@@ -2,6 +2,7 @@
 import io
 import socket
 import sys
+from multiprocessing import Process
 
 
 class WSGIServer(object):
@@ -39,7 +40,10 @@ class WSGIServer(object):
             self.client_connection, client_address = listen_socket.accept()
             # Handle one request and close the client connection. Then
             # loop over to wait for another client connection
-            self.handle_one_request()
+            p = Process(target=self.handle_one_request, args=())
+            p.start()
+            # p.join()
+            # self.handle_one_request()
 
     def handle_one_request(self):
         request_data = self.client_connection.recv(1024)
