@@ -5,6 +5,7 @@ import sys
 import os
 import errno
 import signal
+import select
 from multiprocessing import Process
 
 
@@ -22,6 +23,7 @@ class WSGIServer(object):
         )
         # Allow to reuse the same address
         listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_socket.setblocking(0)
         # Bind
         listen_socket.bind(server_address)
         # Activate
@@ -33,77 +35,60 @@ class WSGIServer(object):
         # Return headers set by Web framework/Web application
         self.headers_set = []
 
-    def __reap_children(selflili, signum, frame):
-        """
-        collect zombie children
-        """
-        while True:
-            try:
-                # wait for all children, do not block
-                pid, status = os.waitpid(-1, os.WNOHANG)
-                if pid == 0:  # no more zombies
-                    break
-            except:
-                # usally this would be OSError exception
-                # with errno attribute set to errno.ECHILD
-                # which means there are no more children
-                break
-
     def set_app(self, application):
         self.application = application
 
     def serve_forever(self):
-        signal.signal(signal.SIGCHLD, self.__reap_children)
-        listen_socket = self.listen_socket
+        rlist, wlist, elist = [self.listen_socket], [], []
+
+        # listen_socket = self.listen_socket
         while True:
-            # New client connection
-            try:
-                self.client_connection, client_address = listen_socket.accept()
-            except IOError as e:
-                code, msg = e.args
-                if code == errno.EINR:
-                    continue
+            readables, writables, exceptions = select.select(rlist, wlist, elist)
+            for sock in readables:
+                if sock is self.listen_socket:
+                    try:
+                        conn, client_address = self.listen_socket.accept()
+                    except IOError as e:
+                        code, msg = e.args
+                        if code == errno.EINTR:
+                            continue
+                        else:
+                            raise
+                    rlist.append(conn)
                 else:
-                    raise
-            pid = os.fork()
-            if pid == 0:  # child
-                self.listen_socket.close()
-                self.handle_one_request()
-                os._exit(0)
-            else:  # parent
-                self.client_connection.close()
+                    try:
+                        request_data = sock.recv(1024)
+                    except ConnectionResetError as e:
+                        request_data = None
+                    if not request_data:
+                        sock.close()
+                        rlist.remove(sock)
+                    else:
+                        request_data = request_data.decode('utf-8')
+                        print(''.join(
+                            f'< {line}\n' for line in request_data.splitlines()
+                        ))
+                        # parse request
+                        (request_method, path, request_version) = self.parse_request(request_data)
+                        env = self.get_environ(
+                            request_data, request_method, path,
+                            self.server_name, self.server_port
+                        )
+                        result = self.application(env, self.start_response)
+                        self.finish_response(result, sock)
 
-
-    def handle_one_request(self):
-        request_data = self.client_connection.recv(1024)
-        self.request_data = request_data = request_data.decode('utf-8')
-        # Print formatted request data a la 'curl -v'
-        print(''.join(
-            f'< {line}\n' for line in request_data.splitlines()
-        ))
-
-        self.parse_request(request_data)
-
-        # Construct environment dictionary using request data
-        env = self.get_environ()
-
-        # It's time to call our application callable and get
-        # back a result that will become HTTP response body
-        result = self.application(env, self.start_response)
-
-        # Construct a response and send it back to the client
-        self.finish_response(result)
-
-    def parse_request(self, text):
+    @classmethod
+    def parse_request(cls, text):
         request_line = text.splitlines()[0]
         request_line = request_line.rstrip('\r\n')
         # Break down the request line into components
-        (self.request_method,  # GET
-         self.path,            # /hello
-         self.request_version  # HTTP/1.1
-         ) = request_line.split()
+        # (self.request_method,  # GET
+        #  self.path,            # /hello
+        #  self.request_version  # HTTP/1.1
+        #  ) = request_line.split()
+        return request_line.split()
 
-    def get_environ(self):
+    def get_environ(self, request_data, request_method, path, server_name, server_port):
         env = {}
         # The following code snippet does not follow PEP8 conventions
         # but it's formatted the way it is for demonstration purposes
@@ -112,16 +97,16 @@ class WSGIServer(object):
         # Required WSGI variables
         env['wsgi.version']      = (1, 0)
         env['wsgi.url_scheme']   = 'http'
-        env['wsgi.input']        = io.StringIO(self.request_data)
+        env['wsgi.input']        = io.StringIO(request_data)
         env['wsgi.errors']       = sys.stderr
         env['wsgi.multithread']  = False
         env['wsgi.multiprocess'] = False
         env['wsgi.run_once']     = False
         # Required CGI variables
-        env['REQUEST_METHOD']    = self.request_method    # GET
-        env['PATH_INFO']         = self.path              # /hello
-        env['SERVER_NAME']       = self.server_name       # localhost
-        env['SERVER_PORT']       = str(self.server_port)  # 8888
+        env['REQUEST_METHOD']    = request_method    # GET
+        env['PATH_INFO']         = path              # /hello
+        env['SERVER_NAME']       = server_name       # localhost
+        env['SERVER_PORT']       = str(server_port)  # 8888
         return env
 
     def start_response(self, status, response_headers, exc_info=None):
@@ -136,24 +121,20 @@ class WSGIServer(object):
         # for now.
         # return self.finish_response
 
-    def finish_response(self, result):
-        try:
-            status, response_headers = self.headers_set
-            response = f'HTTP/1.1 {status}\r\n'
-            for header in response_headers:
-                response += '{0}: {1}\r\n'.format(*header)
-            response += '\r\n'
-            for data in result:
-                response += data.decode('utf-8')
-            # Print formatted response data a la 'curl -v'
-            print(''.join(
-                f'> {line}\n' for line in response.splitlines()
-            ))
-            response_bytes = response.encode()
-            self.client_connection.sendall(response_bytes)
-        finally:
-            self.client_connection.close()
-
+    def finish_response(self, result, conn):
+        status, response_headers = self.headers_set
+        response = f'HTTP/1.1 {status}\r\n'
+        for header in response_headers:
+            response += '{0}: {1}\r\n'.format(*header)
+        response += '\r\n'
+        for data in result:
+            response += data.decode('utf-8')
+        # Print formatted response data a la 'curl -v'
+        print(''.join(
+            f'> {line}\n' for line in response.splitlines()
+        ))
+        response_bytes = response.encode()
+        conn.sendall(response_bytes)
 
 SERVER_ADDRESS = (HOST, PORT) = '', 8888
 
