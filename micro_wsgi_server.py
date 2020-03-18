@@ -3,6 +3,8 @@ import io
 import socket
 import sys
 import os
+import errno
+import signal
 from multiprocessing import Process
 
 
@@ -31,38 +33,54 @@ class WSGIServer(object):
         # Return headers set by Web framework/Web application
         self.headers_set = []
 
+    def __reap_children(selflili, signum, frame):
+        """
+        collect zombie children
+        """
+        while True:
+            try:
+                # wait for all children, do not block
+                pid, status = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:  # no more zombies
+                    break
+            except:
+                # usally this would be OSError exception
+                # with errno attribute set to errno.ECHILD
+                # which means there are no more children
+                break
+
     def set_app(self, application):
         self.application = application
 
     def serve_forever(self):
+        signal.signal(signal.SIGCHLD, self.__reap_children)
         listen_socket = self.listen_socket
         while True:
             # New client connection
-            self.client_connection, client_address = listen_socket.accept()
-            # Handle one request and close the client connection. Then
-            # loop over to wait for another client connection
+            try:
+                self.client_connection, client_address = listen_socket.accept()
+            except IOError as e:
+                code, msg = e.args
+                if code == errno.EINR:
+                    continue
+                else:
+                    raise
             pid = os.fork()
             if pid == 0:  # child
-                listen_socket.close()
+                self.listen_socket.close()
                 self.handle_one_request()
-                self.client_connection.close()
-                os._exit(os.EX_OK)
+                os._exit(0)
             else:  # parent
                 self.client_connection.close()
-                # os.waitpid(pid, 0)
 
-            # p = Process(target=self.handle_one_request, args=())
-            # p.start()
-            # p.join()
-            # self.handle_one_request()
 
     def handle_one_request(self):
         request_data = self.client_connection.recv(1024)
         self.request_data = request_data = request_data.decode('utf-8')
         # Print formatted request data a la 'curl -v'
-        # print(''.join(
-        #     f'< {line}\n' for line in request_data.splitlines()
-        # ))
+        print(''.join(
+            f'< {line}\n' for line in request_data.splitlines()
+        ))
 
         self.parse_request(request_data)
 
@@ -128,9 +146,9 @@ class WSGIServer(object):
             for data in result:
                 response += data.decode('utf-8')
             # Print formatted response data a la 'curl -v'
-            # print(''.join(
-            #     f'> {line}\n' for line in response.splitlines()
-            # ))
+            print(''.join(
+                f'> {line}\n' for line in response.splitlines()
+            ))
             response_bytes = response.encode()
             self.client_connection.sendall(response_bytes)
         finally:
