@@ -10,7 +10,7 @@ class WSGIServer(object):
 
     address_family = socket.AF_INET
     socket_type = socket.SOCK_STREAM
-    request_queue_size = 1
+    request_queue_size = 1024
 
     def __init__(self, server_address):
         # Create a listening socket
@@ -41,17 +41,18 @@ class WSGIServer(object):
             self.client_connection, client_address = listen_socket.accept()
             # Handle one request and close the client connection. Then
             # loop over to wait for another client connection
-            # pid = os.fork()
-            # if pid == 0:  # child
-            #     listen_socket.close()
-            #     self.handle_one_request()
-            #     self.client_connection.close()
-            #     os._exit()
-            # else:  # parent
-            #     self.client_connection.close()
+            pid = os.fork()
+            if pid == 0:  # child
+                listen_socket.close()
+                self.handle_one_request()
+                self.client_connection.close()
+                os._exit(os.EX_OK)
+            else:  # parent
+                self.client_connection.close()
+                # os.waitpid(pid, 0)
 
-            p = Process(target=self.handle_one_request, args=())
-            p.start()
+            # p = Process(target=self.handle_one_request, args=())
+            # p.start()
             # p.join()
             # self.handle_one_request()
 
@@ -59,9 +60,9 @@ class WSGIServer(object):
         request_data = self.client_connection.recv(1024)
         self.request_data = request_data = request_data.decode('utf-8')
         # Print formatted request data a la 'curl -v'
-        print(''.join(
-            f'< {line}\n' for line in request_data.splitlines()
-        ))
+        # print(''.join(
+        #     f'< {line}\n' for line in request_data.splitlines()
+        # ))
 
         self.parse_request(request_data)
 
@@ -127,9 +128,9 @@ class WSGIServer(object):
             for data in result:
                 response += data.decode('utf-8')
             # Print formatted response data a la 'curl -v'
-            print(''.join(
-                f'> {line}\n' for line in response.splitlines()
-            ))
+            # print(''.join(
+            #     f'> {line}\n' for line in response.splitlines()
+            # ))
             response_bytes = response.encode()
             self.client_connection.sendall(response_bytes)
         finally:
