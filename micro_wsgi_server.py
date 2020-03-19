@@ -4,9 +4,9 @@ import socket
 import sys
 import os
 import errno
-import signal
 import select
-from multiprocessing import Process
+from concurrent.futures.process import ProcessPoolExecutor
+import multiprocessing
 
 
 class WSGIServer(object):
@@ -81,11 +81,6 @@ class WSGIServer(object):
     def parse_request(cls, text):
         request_line = text.splitlines()[0]
         request_line = request_line.rstrip('\r\n')
-        # Break down the request line into components
-        # (self.request_method,  # GET
-        #  self.path,            # /hello
-        #  self.request_version  # HTTP/1.1
-        #  ) = request_line.split()
         return request_line.split()
 
     def get_environ(self, request_data, request_method, path, server_name, server_port):
