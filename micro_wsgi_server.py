@@ -23,7 +23,7 @@ class WSGIServer(object):
         )
         # Allow to reuse the same address
         listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen_socket.setblocking(0)
+        # listen_socket.setblocking(0)
         # Bind
         listen_socket.bind(server_address)
         # Activate
@@ -34,13 +34,33 @@ class WSGIServer(object):
         self.server_port = port
         # Return headers set by Web framework/Web application
         self.headers_set = []
+        self.pids = []
 
     def set_app(self, application):
         self.application = application
 
-    def serve_forever(self):
-        rlist, wlist, elist = [self.listen_socket], [], []
+    def child_loop(self, idx):
+        while True:
+            try:
+               self.client_connection, client_addr = self.listen_socket.accept()
+            except IOError as e:
+                code, msg = e.args
+                if code == errno.EINTR:
+                    continue
+                else:
+                    raise
+            self.handle_one_request()
+            conn.close()
 
+    def create_child(self, idx):
+        pid = os.fork()
+        if pid > 0:
+            return pid
+        print('Child started with PID: %s' % os.getpid())
+        self.child_loop(idx)
+
+    def serve_forever(self):
+        self.pids = [self.create_child(idx) for idx in range(multiprocessing.cpu_count())]
         # listen_socket = self.listen_socket
         while True:
             readables, writables, exceptions = select.select(rlist, wlist, elist)
@@ -77,13 +97,27 @@ class WSGIServer(object):
                         result = self.application(env, self.start_response)
                         self.finish_response(result, sock)
 
+    def handle_one_request(self):
+        request_data = self.client_connection.recv(1024)
+        self.request_data = request_data = request_data.decode('utf-8')
+        print(''.join(
+            f'< {line}\n' for line in request_data.splitlines()
+        ))
+        self.parse_request(request_data)
+        env = self.get_environ()
+        result = self.application(env, self.start_response)
+        self.finish_response(result)
+
     @classmethod
     def parse_request(cls, text):
         request_line = text.splitlines()[0]
         request_line = request_line.rstrip('\r\n')
-        return request_line.split()
+        (self.request_method,
+        self.path,
+        self.request_version
+        ) = request_line.split()
 
-    def get_environ(self, request_data, request_method, path, server_name, server_port):
+    def get_environ(self):
         env = {}
         # The following code snippet does not follow PEP8 conventions
         # but it's formatted the way it is for demonstration purposes
@@ -92,16 +126,16 @@ class WSGIServer(object):
         # Required WSGI variables
         env['wsgi.version']      = (1, 0)
         env['wsgi.url_scheme']   = 'http'
-        env['wsgi.input']        = io.StringIO(request_data)
+        env['wsgi.input']        = io.StringIO(self.request_data)
         env['wsgi.errors']       = sys.stderr
         env['wsgi.multithread']  = False
         env['wsgi.multiprocess'] = False
         env['wsgi.run_once']     = False
         # Required CGI variables
-        env['REQUEST_METHOD']    = request_method    # GET
-        env['PATH_INFO']         = path              # /hello
-        env['SERVER_NAME']       = server_name       # localhost
-        env['SERVER_PORT']       = str(server_port)  # 8888
+        env['REQUEST_METHOD']    = self.request_method    # GET
+        env['PATH_INFO']         = self.path              # /hello
+        env['SERVER_NAME']       = self.server_name       # localhost
+        env['SERVER_PORT']       = str(self.server_port)  # 8888
         return env
 
     def start_response(self, status, response_headers, exc_info=None):
